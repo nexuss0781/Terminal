@@ -11,6 +11,18 @@
     <!-- Local Echo Library -->
     <script src="https://cdn.jsdelivr.net/npm/local-echo@4.0.0/lib/local-echo.js"></script>
     <style>
+        :root {
+            --bg-color: #1e1e2e;
+            --header-bg: rgba(30, 30, 46, 0.9);
+            --border-color: #45455a;
+            --text-color: #cdd6f4;
+            --accent-color: #89b4fa;
+            --error-color: #f38ba8;
+            --success-color: #a6e3a1;
+            --warning-color: #f9e2af;
+            --font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+        }
+
         * {
             margin: 0;
             padding: 0;
@@ -22,26 +34,28 @@
             flex-direction: column;
             height: 100vh;
             background: linear-gradient(135deg, #1a1a2e, #16213e);
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: var(--font-family);
             overflow: hidden;
+            color: var(--text-color);
         }
         
         .terminal-header {
             padding: 1rem;
-            background: rgba(30, 30, 46, 0.9);
+            background: var(--header-bg);
             backdrop-filter: blur(10px);
-            border-bottom: 1px solid #45455a;
+            border-bottom: 1px solid var(--border-color);
             display: flex;
             justify-content: space-between;
             align-items: center;
             z-index: 10;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
         }
         
         .terminal-title {
             display: flex;
             align-items: center;
             gap: 0.75rem;
-            color: #cdd6f4;
+            color: var(--text-color);
             font-size: 1.25rem;
             font-weight: 600;
         }
@@ -49,7 +63,7 @@
         .terminal-title svg {
             width: 1.5rem;
             height: 1.5rem;
-            color: #89b4fa;
+            color: var(--accent-color);
         }
         
         .connection-status {
@@ -61,23 +75,28 @@
         }
         
         .status-dot {
-            width: 8px;
-            height: 8px;
+            width: 10px;
+            height: 10px;
             border-radius: 50%;
-            background: #f38ba8;
+            background: var(--error-color); /* Default: Disconnected */
             transition: all 0.3s ease;
         }
         
         .status-dot.connected {
-            background: #a6e3a1;
+            background: var(--success-color);
             box-shadow: 0 0 0 3px rgba(166, 227, 161, 0.3);
+        }
+
+        .status-dot.connecting {
+            background: var(--warning-color);
+            box-shadow: 0 0 0 3px rgba(249, 226, 175, 0.3);
         }
         
         #terminal-container {
             flex: 1;
             width: 100%;
             padding: 1rem;
-            background: #1e1e2e;
+            background: var(--bg-color);
             border-radius: 0 0 12px 12px;
             box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
             position: relative;
@@ -120,8 +139,8 @@
 <body>
     <header class="terminal-header">
         <div class="terminal-title">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M12 5l7 7-7 7" />
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 17l6-6-6-6M12 19h8"/>
             </svg>
             <span>Web Terminal</span>
         </div>
@@ -136,36 +155,26 @@
         <div class="terminal-container-inner" id="terminal-inner"></div>
     </div>
 
-    <div id="websocket-log" style="position: fixed; bottom: 0; left: 0; width: 100%; max-height: 150px; overflow-y: scroll; background: rgba(0,0,0,0.8); color: #fff; font-family: monospace; font-size: 0.7em; padding: 5px; z-index: 9999; display: none;"></div>
-
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             const terminalContainer = document.getElementById('terminal-inner');
             const statusIndicator = document.getElementById('status-indicator');
             const statusText = document.getElementById('status-text');
-            const websocketLogDiv = document.getElementById('websocket-log');
 
-            function logToWebsocketDiv(message) {
-                const timestamp = new Date().toLocaleTimeString();
-                websocketLogDiv.style.display = 'block'; // Make sure it's visible
-                websocketLogDiv.innerHTML += `<div>[${timestamp}] ${message}</div>`;
-                websocketLogDiv.scrollTop = websocketLogDiv.scrollHeight; // Scroll to bottom
-            }
-            
             // Initialize terminal with modern theme
             const term = new Terminal({
                 cursorBlink: true,
-                fontFamily: 'Fira Code, Consolas, monospace',
+                fontFamily: 'var(--font-family)',
                 fontSize: 14,
                 lineHeight: 1.2,
                 fontWeight: 'normal',
                 fontWeightBold: 'bold',
                 allowProposedApi: true,
                 theme: {
-                    background: '#1e1e2e',
-                    foreground: '#cdd6f4',
+                    background: 'var(--bg-color)',
+                    foreground: 'var(--text-color)',
                     cursor: '#f5e0dc',
-                    cursorAccent: '#1e1e2e',
+                    cursorAccent: 'var(--bg-color)',
                     selectionBackground: 'rgba(100, 116, 139, 0.4)',
                     selectionForeground: '#f5e0dc',
                     black: '#45475a',
@@ -200,51 +209,79 @@
             term.focus();
             
             // Initialize LocalEchoController for proper command echoing
-            const localEcho = new LocalEchoController();
-            let currentPrompt = '$ ';
+            const localEcho = new LocalEchoController(term); // Pass term instance
             
-            // Set up WebSocket connection
+            let currentPrompt = '$ ';
+            let socket;
+            let reconnectAttempts = 0;
+            const MAX_RECONNECT_ATTEMPTS = 10;
+            const RECONNECT_INTERVAL = 3000; // 3 seconds
+
             const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
             const wsUrl = protocol + location.host + '/ws';
-            let socket = new WebSocket(wsUrl);
-            
-            // Connection event handlers
-            socket.onopen = () => {
-                updateConnectionStatus(true);
-                term.write('\x1b[32m✓ Connected to terminal server\x1b[0m\r\n');
-                term.write(currentPrompt);
-                logToWebsocketDiv('WebSocket: Connected');
-            };
-            
-            socket.onclose = (event) => {
-                updateConnectionStatus(false);
-                term.write('\r\n\x1b[31m✗ Connection closed\x1b[0m\r\n');
-                currentPrompt = '[disconnected] $ ';
-                term.write(currentPrompt);
-                logToWebsocketDiv(`WebSocket: Closed (Code: ${event.code}, Reason: ${event.reason || 'N/A'})`);
-                setTimeout(reconnect, 3000);
-            };
-            
-            socket.onerror = (error) => {
-                console.error('WebSocket Error:', error);
-                term.write('\r\n\x1b[33m⚠ Connection error occurred\x1b[0m\r\n');
-                logToWebsocketDiv(`WebSocket: Error - ${error.message || 'Unknown error'}`);
-            };
-            
-            socket.onmessage = (event) => {
-                // Write server response to terminal
-                term.write(event.data);
-                logToWebsocketDiv(`WebSocket: Received data - ${event.data.substring(0, 50)}...`); // Log first 50 chars
-            };
-            
-            // Set up local echo for command handling
-            localEcho.attach(term);
-            
-            // Handle command submission with proper echoing
-            localEcho.addAutocompleteHandler(async (index, tokens) => {
-                // You can add autocomplete logic here if needed
-                return [];
-            });
+
+            function updateConnectionStatus(state) {
+                statusIndicator.classList.remove('connected', 'connecting');
+                switch (state) {
+                    case 'connected':
+                        statusIndicator.classList.add('connected');
+                        statusText.textContent = 'Connected';
+                        currentPrompt = '$ ';
+                        reconnectAttempts = 0;
+                        break;
+                    case 'connecting':
+                        statusIndicator.classList.add('connecting');
+                        statusText.textContent = 'Connecting...';
+                        currentPrompt = '[connecting] $ ';
+                        break;
+                    case 'disconnected':
+                    default:
+                        statusText.textContent = 'Disconnected';
+                        currentPrompt = '[disconnected] $ ';
+                        break;
+                }
+            }
+
+            function connectWebSocket() {
+                if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+                    return;
+                }
+
+                updateConnectionStatus('connecting');
+                term.write('\r\n\x1b[33m⟳ Attempting to connect...\x1b[0m\r\n');
+                
+                socket = new WebSocket(wsUrl);
+                
+                socket.onopen = () => {
+                    updateConnectionStatus('connected');
+                    term.write('\r\n\x1b[32m✓ Connected to terminal server\x1b[0m\r\n');
+                    term.write(currentPrompt);
+                    sendResizeData(); // Send initial resize data on connect
+                };
+                
+                socket.onclose = (event) => {
+                    updateConnectionStatus('disconnected');
+                    term.write(`\r\n\x1b[31m✗ Connection closed (Code: ${event.code})\x1b[0m\r\n`);
+                    term.write(currentPrompt);
+                    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                        reconnectAttempts++;
+                        term.write(`\x1b[33mAttempting to reconnect in ${RECONNECT_INTERVAL / 1000} seconds (Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...\x1b[0m\r\n`);
+                        setTimeout(connectWebSocket, RECONNECT_INTERVAL);
+                    } else {
+                        term.write('\r\n\x1b[31mMax reconnection attempts reached. Please refresh the page.\x1b[0m\r\n');
+                    }
+                };
+                
+                socket.onerror = (error) => {
+                    console.error('WebSocket Error:', error);
+                    term.write('\r\n\x1b[31m⚠ WebSocket error occurred. Check console for details.\x1b[0m\r\n');
+                    // Error usually leads to onclose, so no need to call updateConnectionStatus here
+                };
+                
+                socket.onmessage = (event) => {
+                    term.write(event.data);
+                };
+            }
             
             // Main command handling
             const handleCommand = async (command) => {
@@ -253,22 +290,17 @@
                     return;
                 }
                 
-                // If disconnected, show error message
                 if (socket.readyState !== WebSocket.OPEN) {
-                    term.write('\r\n\x1b[31m✗ Not connected to server. Please wait for reconnection...\x1b[0m\r\n');
+                    term.write('\r\n\x1b[31m✗ Not connected to server. Please wait for reconnection or refresh.\x1b[0m\r\n');
                     term.write(currentPrompt);
-                    logToWebsocketDiv('Command not sent: WebSocket not open.');
                     return;
                 }
                 
                 try {
-                    // Send command to server
                     socket.send(command + '\n');
-                    logToWebsocketDiv(`WebSocket: Sent command - ${command}`);
                 } catch (error) {
                     term.write('\r\n\x1b[31m✗ Error sending command: ' + error.message + '\x1b[0m\r\n');
                     term.write(currentPrompt);
-                    logToWebsocketDiv(`WebSocket: Error sending command - ${error.message}`);
                 }
             };
             
@@ -279,28 +311,29 @@
                         const command = await localEcho.read(currentPrompt, '');
                         await handleCommand(command);
                     } catch (error) {
-                        term.write('\r\n\x1b[31m✗ Command error: ' + error.message + '\x1b[0m\r\n');
+                        // This catch block handles errors from localEcho.read, e.g., if terminal is disposed
+                        term.write('\r\n\x1b[31m✗ Terminal input error: ' + error.message + '\x1b[0m\r\n');
                         term.write(currentPrompt);
-                        logToWebsocketDiv(`Command error: ${error.message}`);
+                        break; // Exit prompt loop on critical error
                     }
                 }
             };
             
-            // Start the terminal interface
-            startPrompt();
-            
             // Handle terminal resizing
-            const handleResize = () => {
-                fitAddon.fit();
-                if (socket.readyState === WebSocket.OPEN) {
+            const sendResizeData = () => {
+                if (socket && socket.readyState === WebSocket.OPEN) {
                     const dimensions = {
                         type: 'resize',
                         cols: term.cols,
                         rows: term.rows
                     };
                     socket.send(JSON.stringify(dimensions));
-                    logToWebsocketDiv(`WebSocket: Sent resize - cols: ${dimensions.cols}, rows: ${dimensions.rows}`);
                 }
+            };
+
+            const handleResize = () => {
+                fitAddon.fit();
+                sendResizeData();
             };
             
             // Debounced resize handler
@@ -310,60 +343,9 @@
                 resizeTimeout = setTimeout(handleResize, 100);
             });
             
-            // Connection status management
-            function updateConnectionStatus(isConnected) {
-                if (isConnected) {
-                    statusIndicator.classList.add('connected');
-                    statusText.textContent = 'Connected';
-                    currentPrompt = '$ ';
-                } else {
-                    statusIndicator.classList.remove('connected');
-                    statusText.textContent = 'Disconnected';
-                    currentPrompt = '[disconnected] $ ';
-                }
-            }
-            
-            // Reconnection logic
-            function reconnect() {
-                if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
-                    return;
-                }
-                
-                term.write('\r\n\x1b[33m⟳ Attempting to reconnect...\x1b[0m\r\n');
-                logToWebsocketDiv('WebSocket: Attempting to reconnect...');
-                socket = new WebSocket(wsUrl);
-                
-                socket.onopen = () => {
-                    updateConnectionStatus(true);
-                    term.write('\r\n\x1b[32m✓ Reconnected successfully\x1b[0m\r\n');
-                    term.write(currentPrompt);
-                    logToWebsocketDiv('WebSocket: Reconnected successfully');
-                };
-                
-                socket.onclose = (event) => {
-                    updateConnectionStatus(false);
-                    logToWebsocketDiv(`WebSocket: Reconnection closed (Code: ${event.code}, Reason: ${event.reason || 'N/A'})`);
-                    setTimeout(reconnect, 5000);
-                };
-                
-                socket.onerror = (error) => {
-                    console.error('Reconnection error:', error);
-                    logToWebsocketDiv(`WebSocket: Reconnection error - ${error.message || 'Unknown error'}`);
-                };
-                
-                socket.onmessage = (event) => {
-                    term.write(event.data);
-                    logToWebsocketDiv(`WebSocket: Reconnection received data - ${event.data.substring(0, 50)}...`);
-                };
-            }
-            
-            // Initial setup
-            setTimeout(() => {
-                if (socket.readyState === WebSocket.CONNECTING) {
-                    term.writeln('\x1b[33m⌛ Connecting to terminal server...\x1b[0m');
-                    logToWebsocketDiv('WebSocket: Initial connection attempt...');
-                }
-            }, 1000);
+            // Initial connection attempt
+            connectWebSocket();
+            startPrompt();
         });
     </script>
 </body>

@@ -4,9 +4,17 @@ import pty
 import fcntl
 import struct
 import termios
-import uvicorn  # <-- Import uvicorn
-from fastapi import FastAPI, WebSocket
+import uvicorn
+import logging
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
+
+from pty_process import PtyProcess # Import the new class
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -19,11 +27,6 @@ except FileNotFoundError:
     html_content = "<h1>Error: index.html not found</h1><p>Please create an index.html file in the same directory.</p>"
 
 
-def set_winsize(fd, row, col, xpix=0, ypix=0):
-    """Set window size of a pseudo-terminal."""
-    winsize = struct.pack("HHHH", row, col, xpix, ypix)
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
-
 @app.get("/")
 async def get():
     """Serves the HTML page."""
@@ -34,85 +37,46 @@ async def get():
 async def websocket_endpoint(websocket: WebSocket):
     """Handles the WebSocket connection for the terminal session."""
     await websocket.accept()
-    print(f"WebSocket accepted from {websocket.client.host}:{websocket.client.port}")
+    client_host = f"{websocket.client.host}:{websocket.client.port}"
+    logger.info(f"WebSocket accepted from {client_host}")
 
-    # Create a new pseudo-terminal
-    master_fd, slave_fd = pty.openpty()
-
-    # Create a new bash process and connect it to the pseudo-terminal
-    pid = os.fork()
-    if pid == 0:  # Child process
-        os.setsid()
-        os.dup2(slave_fd, 0)  # stdin
-        os.dup2(slave_fd, 1)  # stdout
-        os.dup2(slave_fd, 2)  # stderr
-        os.close(master_fd)
-        os.environ['TERM'] = 'xterm-256color' # Use a common term for color support
-        # Launch bash
-        os.execlp("bash", "bash")
-    else:  # Parent process
-        os.close(slave_fd)
-
-    # Set initial window size
-    set_winsize(master_fd, 50, 80) # Default size
-
-    async def read_and_forward_pty_output():
-        """Reads output from the pty and forwards it to the WebSocket."""
-        while True:
-            try:
-                # Use a small sleep to prevent a busy loop
-                await asyncio.sleep(0.01)
-                output = os.read(master_fd, 1024)
-                if output:
-                    await websocket.send_text(output.decode(errors="ignore"))
-                else: # When the process exits, os.read returns empty bytes
-                    break
-            except (IOError, OSError):
-                break
-        await websocket.close()
-
-
-    # Start the task that reads from the PTY
-    output_task = asyncio.create_task(read_and_forward_pty_output())
-
+    pty_process = PtyProcess(websocket, asyncio.get_event_loop())
     try:
+        await pty_process.spawn()
+        pty_process.set_winsize(50, 80) # Default size
+
         while True:
-            # Wait for input from the WebSocket
             data = await websocket.receive_text()
-            print(f"Received from WebSocket: {data[:50]}...") # Log first 50 chars
+            logger.debug(f"Received from WebSocket ({client_host}): {data[:50]}...")
             
-            # Check for special resize command from frontend
             if data.startswith('{"type":"resize"'):
                 import json
                 resize_data = json.loads(data)
                 rows = resize_data.get('rows', 50)
                 cols = resize_data.get('cols', 80)
-                set_winsize(master_fd, rows, cols)
-                print(f"Resized PTY to {rows}x{cols}")
+                pty_process.set_winsize(rows, cols)
+                logger.info(f"Resized PTY for {client_host} to {rows}x{cols}")
             else:
-                # Forward user input to the pty
-                os.write(master_fd, data.encode())
-                print(f"Sent to PTY: {data[:50]}...") # Log first 50 chars
+                pty_process.write(data.encode())
+                logger.debug(f"Sent to PTY ({client_host}): {data[:50]}...")
     except WebSocketDisconnect:
-        print(f"WebSocket disconnected for pid {pid}.")
+        logger.info(f"WebSocket disconnected for {client_host}.")
     except Exception as e:
-        print(f"An unexpected error occurred in WebSocket loop for pid {pid}: {e}")
+        logger.error(f"An unexpected error occurred in WebSocket loop for {client_host}: {e}")
     finally:
-        # Clean up when the connection is closed
-        output_task.cancel()
-        os.kill(pid, 15) # Send SIGTERM to the bash process
-        os.close(master_fd)
-        print(f"Session for pid {pid} closed.")
+        pty_process.close()
+        logger.info(f"Session for {client_host} closed.")
 
 
-# ======================================================================
-# NEW SECTION: This block runs the server when the script is executed
-# ======================================================================
 if __name__ == "__main__":
-    print("Starting Web Terminal server...")
-    print("Access it at http://<your-ip-address>:8000")
+    logger.info("Starting Web Terminal server...")
+    logger.info("Access it at http://0.0.0.0:8000")
     
-    # We use the string "app:app" to allow for --reload to work correctly
-    # host="0.0.0.0" makes the server accessible from your network
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
-# ======================================================================
+
+
+if __name__ == "__main__":
+    logger.info("Starting Web Terminal server...")
+    logger.info("Access it at http://0.0.0.0:8000")
+    
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
