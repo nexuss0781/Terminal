@@ -34,6 +34,7 @@ async def get():
 async def websocket_endpoint(websocket: WebSocket):
     """Handles the WebSocket connection for the terminal session."""
     await websocket.accept()
+    print(f"WebSocket accepted from {websocket.client.host}:{websocket.client.port}")
 
     # Create a new pseudo-terminal
     master_fd, slave_fd = pty.openpty()
@@ -78,6 +79,7 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             # Wait for input from the WebSocket
             data = await websocket.receive_text()
+            print(f"Received from WebSocket: {data[:50]}...") # Log first 50 chars
             
             # Check for special resize command from frontend
             if data.startswith('{"type":"resize"'):
@@ -86,11 +88,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 rows = resize_data.get('rows', 50)
                 cols = resize_data.get('cols', 80)
                 set_winsize(master_fd, rows, cols)
+                print(f"Resized PTY to {rows}x{cols}")
             else:
                 # Forward user input to the pty
                 os.write(master_fd, data.encode())
-    except Exception:
-        pass
+                print(f"Sent to PTY: {data[:50]}...") # Log first 50 chars
+    except WebSocketDisconnect:
+        print(f"WebSocket disconnected for pid {pid}.")
+    except Exception as e:
+        print(f"An unexpected error occurred in WebSocket loop for pid {pid}: {e}")
     finally:
         # Clean up when the connection is closed
         output_task.cancel()
